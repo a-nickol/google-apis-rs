@@ -3426,7 +3426,6 @@ where
                         .header(CONTENT_TYPE, content_type.to_string())
                         .body(hyper::body::Body::from(body_reader_bytes));
                 
-                    eprintln!("{request:?}");
                     client.request(request.unwrap()).await
                 }
             };
