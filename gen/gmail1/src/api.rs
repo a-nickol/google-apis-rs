@@ -3343,6 +3343,7 @@ where
 
         params.extend(self._additional_params.iter());
 
+        params.push("alt", "json");
         let mut url = self.hub._root_url.clone() + "gmail/v1/users/{userId}/drafts";
 
         if self._scopes.is_empty() {
