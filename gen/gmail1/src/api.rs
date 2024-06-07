@@ -3316,12 +3316,9 @@ where
     S::Error: Into<Box<dyn StdError + Send + Sync>>,
 {
     /// Perform the operation you have build so far.
-    pub async fn do_send_it<RS>(
+    pub async fn do_send_it(
         mut self,
-    ) -> client::Result<(hyper::Response<hyper::body::Body>, Draft)>
-    where
-        RS: client::ReadSeek,
-    {
+    ) -> client::Result<(hyper::Response<hyper::body::Body>, Draft)> {
         use client::{url::Params, ToParts};
         use hyper::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, LOCATION, USER_AGENT};
         use std::borrow::Cow;
