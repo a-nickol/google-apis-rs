@@ -3344,7 +3344,7 @@ where
         params.extend(self._additional_params.iter());
 
         params.push("alt", "json");
-        let mut url = String::from("gmail/v1/users/{userId}/drafts");
+        let mut url = self.hub._root_url.clone() + "gmail/v1/users/{userId}/drafts";
 
         if self._scopes.is_empty() {
             self._scopes.insert(Scope::Gmai.as_ref().to_string());
