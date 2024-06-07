@@ -1056,8 +1056,7 @@ pub struct Message {
     pub payload: Option<MessagePart>,
     /// The entire email message in an RFC 2822 formatted and base64url encoded string. Returned in `messages.get` and `drafts.get` responses when the `format=RAW` parameter is supplied.
 
-    //#[serde_as(as = "Option<::client::serde::urlsafe_base64::Wrapper>")]
-    pub raw: Option<Vec<u8>>,
+    pub raw: Option<String>,
     /// Estimated size in bytes of the message.
     #[serde(rename = "sizeEstimate")]
     pub size_estimate: Option<i32>,
