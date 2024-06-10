@@ -3482,7 +3482,7 @@ where
     }
 
     /// Perform the operation you have build so far.
-    async fn do_send_multipart<RS>(
+    pub async fn do_send_multipart<RS>(
         mut self,
         mut reader: RS,
         reader_mime_type: mime::Mime,
