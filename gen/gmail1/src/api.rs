@@ -1055,7 +1055,6 @@ pub struct Message {
     /// The parsed email structure in the message parts.
     pub payload: Option<MessagePart>,
     /// The entire email message in an RFC 2822 formatted and base64url encoded string. Returned in `messages.get` and `drafts.get` responses when the `format=RAW` parameter is supplied.
-
     pub raw: Option<String>,
     /// Estimated size in bytes of the message.
     #[serde(rename = "sizeEstimate")]
@@ -3425,7 +3424,199 @@ where
                     let request = req_builder
                         .header(CONTENT_TYPE, content_type.to_string())
                         .body(hyper::body::Body::from(body_reader_bytes));
-                
+
+                    client.request(request.unwrap()).await
+                }
+            };
+
+            match req_result {
+                Err(err) => {
+                    if let client::Retry::After(d) = dlg.http_error(&err) {
+                        sleep(d).await;
+                        continue;
+                    }
+                    dlg.finished(false);
+                    return Err(client::Error::HttpError(err));
+                }
+                Ok(mut res) => {
+                    if !res.status().is_success() {
+                        let res_body_string = client::get_body_as_string(res.body_mut()).await;
+                        let (parts, _) = res.into_parts();
+                        let body = hyper::Body::from(res_body_string.clone());
+                        let restored_response = hyper::Response::from_parts(parts, body);
+
+                        let server_response =
+                            json::from_str::<serde_json::Value>(&res_body_string).ok();
+
+                        if let client::Retry::After(d) =
+                            dlg.http_failure(&restored_response, server_response.clone())
+                        {
+                            sleep(d).await;
+                            continue;
+                        }
+
+                        dlg.finished(false);
+
+                        return match server_response {
+                            Some(error_value) => Err(client::Error::BadRequest(error_value)),
+                            None => Err(client::Error::Failure(restored_response)),
+                        };
+                    }
+                    let result_value = {
+                        let res_body_string = client::get_body_as_string(res.body_mut()).await;
+
+                        match json::from_str(&res_body_string) {
+                            Ok(decoded) => (res, decoded),
+                            Err(err) => {
+                                dlg.response_json_decode_error(&res_body_string, &err);
+                                return Err(client::Error::JsonDecodeError(res_body_string, err));
+                            }
+                        }
+                    };
+
+                    dlg.finished(true);
+                    return Ok(result_value);
+                }
+            }
+        }
+    }
+
+    /// Perform the operation you have build so far.
+    async fn do_send_multipart<RS>(
+        mut self,
+        mut reader: RS,
+        reader_mime_type: mime::Mime,
+    ) -> client::Result<(hyper::Response<hyper::body::Body>, Draft)>
+    where
+        RS: client::ReadSeek,
+    {
+        use client::{url::Params, ToParts};
+        use hyper::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, LOCATION, USER_AGENT};
+        use std::borrow::Cow;
+        use std::io::{Read, Seek};
+
+        let mut dd = client::DefaultDelegate;
+        let mut dlg: &mut dyn client::Delegate = self._delegate.unwrap_or(&mut dd);
+        dlg.begin(client::MethodInfo {
+            id: "gmail.users.drafts.create",
+            http_method: hyper::Method::POST,
+        });
+
+        for &field in ["alt", "userId"].iter() {
+            if self._additional_params.contains_key(field) {
+                dlg.finished(false);
+                return Err(client::Error::FieldClash(field));
+            }
+        }
+
+        let mut params = Params::with_capacity(4 + self._additional_params.len());
+        params.push("userId", self._user_id);
+
+        params.extend(self._additional_params.iter());
+
+        params.push("alt", "json");
+        let (mut url, upload_type) = (
+            self.hub._root_url.clone() + "upload/gmail/v1/users/{userId}/drafts",
+            "multipart",
+        );
+        params.push("uploadType", upload_type);
+        if self._scopes.is_empty() {
+            self._scopes.insert(Scope::Gmai.as_ref().to_string());
+        }
+
+        for &(find_this, param_name) in [("{userId}", "userId")].iter() {
+            url = params.uri_replacement(url, param_name, find_this, false);
+        }
+        {
+            let to_remove = ["userId"];
+            params.remove_params(&to_remove);
+        }
+
+        let url = params.parse_with_url(&url);
+
+        let mut json_mime_type = mime::APPLICATION_JSON;
+        let mut request_value_reader = {
+            let mut value = json::value::to_value(&self._request).expect("serde to work");
+            client::remove_json_null_values(&mut value);
+            let mut dst = io::Cursor::new(Vec::with_capacity(128));
+            json::to_writer(&mut dst, &value).unwrap();
+            dst
+        };
+        let request_size = request_value_reader.seek(io::SeekFrom::End(0)).unwrap();
+        request_value_reader.seek(io::SeekFrom::Start(0)).unwrap();
+
+        let mut should_ask_dlg_for_url = false;
+        let mut upload_url: Option<String> = None;
+
+        loop {
+            let token = match self
+                .hub
+                .auth
+                .get_token(&self._scopes.iter().map(String::as_str).collect::<Vec<_>>()[..])
+                .await
+            {
+                Ok(token) => token,
+                Err(e) => match dlg.token(e) {
+                    Ok(token) => token,
+                    Err(e) => {
+                        dlg.finished(false);
+                        return Err(client::Error::MissingToken(e));
+                    }
+                },
+            };
+            request_value_reader.seek(io::SeekFrom::Start(0)).unwrap();
+            let mut req_result = {
+                if should_ask_dlg_for_url
+                    && (upload_url = dlg.upload_url()) == ()
+                    && upload_url.is_some()
+                {
+                    should_ask_dlg_for_url = false;
+                    Ok(hyper::Response::builder()
+                        .status(hyper::StatusCode::OK)
+                        .header("Location", upload_url.as_ref().unwrap().clone())
+                        .body(hyper::body::Body::empty())
+                        .unwrap())
+                } else {
+                    let mut mp_reader: client::MultiPartReader = Default::default();
+                    let (mut body_reader, content_type) = {
+                        mp_reader.reserve_exact(2);
+                        let size = reader.seek(io::SeekFrom::End(0)).unwrap();
+                        reader.seek(io::SeekFrom::Start(0)).unwrap();
+                        if size > 36700160 {
+                            return Err(client::Error::UploadSizeLimitExceeded(size, 36700160));
+                        }
+                        mp_reader
+                            .add_part(
+                                &mut request_value_reader,
+                                request_size,
+                                json_mime_type.clone(),
+                            )
+                            .add_part(&mut reader, size, reader_mime_type.clone());
+                        (
+                            &mut mp_reader as &mut (dyn io::Read + Send),
+                            client::MultiPartReader::mime_type(),
+                        )
+                    };
+                    let client = &self.hub.client;
+                    dlg.pre_request();
+                    let mut req_builder = hyper::Request::builder()
+                        .method(hyper::Method::POST)
+                        .uri(url.as_str())
+                        .header(USER_AGENT, self.hub._user_agent.clone());
+
+                    if let Some(token) = token.as_ref() {
+                        req_builder =
+                            req_builder.header(AUTHORIZATION, format!("Bearer {}", token));
+                    }
+
+                    let mut body_reader_bytes = vec![];
+                    body_reader.read_to_end(&mut body_reader_bytes).unwrap();
+                    let request = req_builder
+                        .header(CONTENT_TYPE, content_type.to_string())
+                        .body(hyper::body::Body::from(body_reader_bytes));
+
+                    eprintln!("{request:?}");
+
                     client.request(request.unwrap()).await
                 }
             };
